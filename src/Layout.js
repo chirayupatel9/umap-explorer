@@ -3,6 +3,7 @@ import Sidebar from './Sidebar'
 import Projection from './Projection'
 import About from './About'
 import * as _ from 'lodash'
+import LassoSelector from './components/LassoSelector'
 
 // padding constructor
 function p(tb, lr) {
@@ -224,8 +225,10 @@ class Layout extends Component {
             algorithm_choice={algorithm_choice}
           />
         </div>
+
         {show_about ? (
           <About grem={grem} p={p} toggleAbout={this.toggleAbout} />
+          
         ) : null}
       </div>
     ) : (

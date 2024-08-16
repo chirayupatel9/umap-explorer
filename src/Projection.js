@@ -550,6 +550,7 @@ class Projection extends Component {
   componentWillUnmount() {
     this.mount.removeChild(this.renderer.domElement)
   }
+  
 
   render() {
     let { width, height } = this.props

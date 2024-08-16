@@ -2,6 +2,7 @@ import React, { Component } from 'react'
 import Layout from './Layout'
 import * as _ from 'lodash'
 import * as d3 from 'd3'
+import LassoSelector from './components/LassoSelector'
 
 let algorithm_options = ['UMAP', 'T-SNE', 'UMAP min_dist=0.8']
 let algorithm_embedding_keys = [
@@ -77,6 +78,10 @@ class Data extends Component {
         algorithm_options={algorithm_options}
         algorithm_embedding_keys={algorithm_embedding_keys}
       />
+      // <LassoSelector
+      //       embeddings={this.state.mnist_embeddings}
+      //       labels={this.state.mnist_labels}
+      //     />
     ) : (
       <div style={{ padding: '1rem' }}>Loading data...</div>
     )
