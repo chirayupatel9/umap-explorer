@@ -3,6 +3,11 @@ import * as THREE from 'three'
 import * as _ from 'lodash'
 import * as d3 from 'd3'
 import * as TWEEN from '@tweenjs/tween.js'
+import zoom from './zoom.png'
+import reset from './reset.png'
+import lassoIcon from './lasso.png'
+//import { moveMessagePortToContext } from 'worker_threads'
+import { tsne } from 'tsne-js';
 
 // Constants for sprite sheets
 let sprite_side = 73
@@ -22,7 +27,6 @@ let mnist_images = mnist_tile_locations.map(src => {
   img.src = src
   return img
 })
-
 let zoomScaler = input => {
   let scale1 = d3
     .scaleLinear()
@@ -46,8 +50,13 @@ let zoomScaler = input => {
 
 class Projection extends Component {
   constructor(props) {
-    super(props)
-    this.state = {}
+    super(props);
+    this.state = {
+      isZoomEnabled: true,
+      isLassoActive: false,
+      lassoPoints: [], //this stores points drawn by lasso
+      isPolygonDrawn: false,
+    }
     this.init = this.init.bind(this)
     this.addPoints = this.addPoints.bind(this)
     this.handleResize = this.handleResize.bind(this)
@@ -56,7 +65,286 @@ class Projection extends Component {
     this.getScaleFromZ = this.getScaleFromZ.bind(this)
     this.getZFromScale = this.getZFromScale.bind(this)
     this.changeEmbeddings = this.changeEmbeddings.bind(this)
+    this.zoomHandler = this.zoomHandler.bind(this);
+    this.toggleZoom = this.toggleZoom.bind(this);
+    this.toggleLasso = this.toggleLasso.bind(this);  // Bind toggleLasso here
+    this.enableLasso = this.enableLasso.bind(this);
+    this.disableLasso = this.disableLasso.bind(this);
+    this.handleGenerateTSNE = this.handleGenerateTSNE.bind(this);
+
   }
+
+  toggleZoom() {
+    this.setState((prevState) => ({
+      isZoomEnabled: !prevState.isZoomEnabled,
+      isLassoActive: false,  // Disable lasso when enabling zoom
+    }), () => {
+      if (this.state.isZoomEnabled) {
+        this.disableLasso();
+        this.setUpCamera(); // Reset the camera to default position
+      }
+    });
+  }
+  
+  toggleLasso() {
+    this.setState((prevState) => ({
+      isLassoActive: !prevState.isLassoActive,
+      isZoomEnabled: false,  // Disable zoom when enabling lasso
+    }), () => {
+      if (this.state.isLassoActive) {
+        this.enableLasso();
+      } else {
+        this.disableLasso();
+        this.setUpCamera(); // Reset the camera to default position
+      }
+    });
+  }
+  
+
+
+
+//log the points inside the shaded polygon
+enableLasso() {
+  const svg = d3.select(this.mount).append("svg")
+    .attr("class", "lasso")
+    .style("position", "absolute")
+    .style("top", 0)
+    .style("left", 0)
+    .style("width", "100%")
+    .style("height", "100%")
+    .style("z-index", 2) // Ensure the SVG is above the canvas
+    .style("pointer-events", "none");
+
+  let lassoPoints = [];
+  let lassoLine = svg.append("path")
+    .attr("class", "lasso-path")
+    .attr("stroke", "red")
+    .attr("stroke-width", 2)
+    .attr("fill", "none");
+
+  const view = d3.select(this.renderer.domElement);
+
+  const onMouseMove = () => {
+    const [mouseX, mouseY] = d3.mouse(svg.node());
+    lassoPoints.push([mouseX, mouseY]);
+    lassoLine.attr("d", d3.line()(lassoPoints));
+  };
+
+  view.on("mousedown", () => {
+    if (lassoPoints.length > 0) {
+      lassoPoints.push(lassoPoints[0]);
+      lassoLine.attr("d", d3.line()(lassoPoints))
+        .attr("fill", "rgba(255, 0, 0, 0.3)");
+
+      view.on("mousemove", null);
+      view.on("mousedown ", null);
+      
+      this.selectPointsInsideLasso(lassoPoints); // Select points inside the lasso
+    } else {
+      const [mouseX, mouseY] = d3.mouse(svg.node());
+      lassoPoints.push([mouseX, mouseY]);
+      view.on("mousemove", onMouseMove);
+    }
+  });
+
+  view.on("mouseup", () => {
+    if (lassoPoints.length > 0) {
+      lassoPoints.push(lassoPoints[0]);
+      lassoLine.attr("d", d3.line()(lassoPoints))
+        .attr("fill", "rgba(255, 0, 0, 0.3)");
+
+      view.on("mousemove", null);
+      view.on("mousedown", null);
+
+      this.selectPointsInsideLasso(lassoPoints); // Select points inside the lasso
+    }
+  });
+}
+
+
+
+
+selectPointsInsideLasso(lassoPoints) {
+  const lassoPolygon = d3.polygonHull(lassoPoints); // Create the lasso polygon
+  if (!lassoPolygon) {
+    console.log('Lasso polygon is not valid.');
+    return;
+  }
+
+  const selectedEmbeddings = [];
+  const point_group = this.scene.children[0].children;
+
+  let minX = Infinity, maxX = -Infinity;
+  let minY = Infinity, maxY = -Infinity;
+
+  point_group.forEach(points => {
+    const positions = points.geometry.attributes.position.array;
+    const numVertices = positions.length / 3;
+    let visible = false;
+
+    for (let i = 0; i < numVertices; i++) {
+      const x = positions[i * 3];
+      const y = positions[i * 3 + 1];
+
+      // Convert the point from world space to screen space
+      const worldPosition = new THREE.Vector3(x, y, 0);
+      const screenPosition = worldPosition.project(this.camera);
+      
+      const pixelX = (screenPosition.x * 0.5 + 0.5) * this.props.width;
+      const pixelY = (-screenPosition.y * 0.5 + 0.5) * this.props.height;
+
+      if (d3.polygonContains(lassoPolygon, [pixelX, pixelY])) {
+        selectedEmbeddings.push([x, y]);
+        minX = Math.min(minX, x);
+        maxX = Math.max(maxX, x);
+        minY = Math.min(minY, y);
+        maxY = Math.max(maxY, y);
+        visible = true;
+      }
+      
+    }
+    points.visible = visible;
+
+    console.log('Selected embeddings:', selectedEmbeddings);
+  });
+
+  if (selectedEmbeddings.length === 0) {
+    console.log('No points were selected inside the lasso.');
+    return;
+  }
+
+  this.setState({
+    selectedEmbeddings,   // Save the embeddings to state if needed
+    isPolygonDrawn: true, // Show the button
+  });
+  // Zoom into the selected points
+  const centerX = (minX + maxX) / 2;
+  const centerY = (minY + maxY) / 2;
+  this.adjustCameraToBoundingBox(minX, maxX, minY, maxY, centerX, centerY);
+}
+
+
+
+
+adjustCameraToBoundingBox(minX, maxX, minY, maxY, centerX, centerY) {
+  // Calculate the width and height of the selected region
+  const width = maxX - minX;
+  const height = maxY - minY;
+
+  
+  // Determine the scale to fit the selected region within the view
+  const aspectRatio = this.camera.aspect;
+  let scale;
+
+  if (width / height > aspectRatio) {
+    // Fit to width  
+    scale = width / this.props.width;
+  } else {    
+    // Fit to height
+    scale = height / this.props.height;
+  }
+  // const zoomLevel = Math.max(scale, 0.1); // Ensure zoom level doesn't go below a minimum value
+
+  // Set the new camera position to center on the selected region
+  // this.camera.position.set(centerX, centerY, this.getZFromScale(zoomLevel));
+
+  // Update the camera's projection matrix to apply changes
+  // this.camera.updateProjectionMatrix();
+  
+  // Optionally, you can trigger a re-render here if needed
+  // this.renderer.render(this.scene, this.camera);
+}
+
+
+
+animate() {
+  requestAnimationFrame(this.animate);
+  TWEEN.update();
+  this.renderer.render(this.scene, this.camera);
+}
+
+handleGenerateTSNE() {
+  const { selectedEmbeddings } = this.state;
+  console.log("aasfdsafdasfdsafsdd");
+  if (selectedEmbeddings.length === 0) {
+    console.warn("No points selected for the new projection.");
+    return;
+  }
+
+  // // Step 1: Clear the old points from the scene
+  this.clearOldProjection();
+
+  // // Step 2: Optionally apply t-SNE or UMAP to the selected points
+  const newProjection = this.applyTSNE(selectedEmbeddings);
+
+  // // Step 3: Render the new projection based on the t-SNE or UMAP result
+  // this.renderNewProjection(newProjection);
+}
+
+clearOldProjection() {
+  // Access the points group and clear the scene (optional)
+  const point_group = this.scene.children[0].children;
+
+  // Remove all previous points from the scene
+  point_group.forEach(points => {
+    this.scene.remove(points); // Completely remove points (or set visible to false)
+  });
+
+  this.renderer.render(this.scene, this.camera);
+}
+
+
+applyTSNE(selectedEmbeddings) {
+  // Initialize the t-SNE model
+  console.log("got embeddings:", selectedEmbeddings);
+}
+
+renderNewProjection(newProjection) {
+  // Render the new t-SNE projection points
+  const point_group = new THREE.Group();
+
+  newProjection.forEach(embedding => {
+    const [x, y] = embedding; // Assuming 2D projection
+
+    const vert = new THREE.Vector3(x, y, 0);
+    const geometry = new THREE.BufferGeometry().setFromPoints([vert]);
+
+    const material = new THREE.PointsMaterial({ size: 5, color: 0xffffff });
+    const point = new THREE.Points(geometry, material);
+
+    point_group.add(point); // Add each point to the group
+  });
+
+  // Add the new points group to the scene
+  this.scene.add(point_group);
+
+  // Re-render the scene with the new projection
+  this.renderer.render(this.scene, this.camera);
+}
+
+
+
+disableLasso() {
+  d3.select("svg.lasso").remove();
+  const view = d3.select(this.renderer.domElement);
+  view.on("mousedown", null);
+  view.on("mousemove", null);
+  view.on("mouseup", null);
+
+  this.setState({ isPolygonDrawn: false }); // Reset the polygon state when lasso is disabled
+
+  this.setUpCamera(); // Reset camera to ensure it's ready for further interactions
+}
+
+
+
+
+  //toggles zoom
+  /*toggleZoom() {
+    this.setState(prevState => ({
+      zoomEnabled: !prevState.zoomEnabled
+    }));
+  }*/
 
   changeEmbeddings(prev_choice, new_choice) {
     // assumes mnist embeddings has been updated
@@ -107,11 +395,24 @@ class Projection extends Component {
   }
 
   getZFromScale(scale) {
-    let rvFOV = THREE.Math.degToRad(this.camera.fov)
-    let scale_height = this.props.height / scale
-    let camera_z_position = scale_height / (2 * Math.tan(rvFOV / 2))
-    return camera_z_position
+    const { width, height } = this.props;
+    const aspectRatio = this.camera.aspect;
+    const maxDim = Math.max(width, height);
+    let rvFOV = THREE.Math.degToRad(this.camera.fov);
+    let scale_height = this.props.height / scale;
+  
+    // Safeguard to prevent zoom from going too close or too far
+    const minZ = 0.1;  // Set a minimum distance
+    const maxZ = 1000; // Set a maximum distance
+  
+    let camera_z_position = Math.max(
+      minZ,
+      Math.min(maxZ, scale_height / (2 * Math.tan(rvFOV / 2)))
+    );
+  
+    return camera_z_position;
   }
+  
 
   getScaleFromZ(camera_z_position) {
     let rvFOV = THREE.Math.degToRad(this.camera.fov)
@@ -135,26 +436,34 @@ class Projection extends Component {
     this.d3_zoom.transform(view, resize_transform)
   }
 
+
   zoomHandler() {
-    let d3_transform = d3.event.transform
-
-    let scale = d3_transform.k
-    let x = -(d3_transform.x - this.props.width / 2) / scale
-    let y = (d3_transform.y - this.props.height / 2) / scale
-    let z = this.getZFromScale(scale)
-
-    this.camera.position.set(x, y, z)
-
+    if (!this.state.isZoomEnabled) return; // Skip zooming if not enabled
+  
+    let d3_transform = d3.event.transform;
+  
+    let scale = d3_transform.k;
+    let x = -(d3_transform.x - this.props.width / 2) / scale;
+    let y = (d3_transform.y - this.props.height / 2) / scale;
+    let z = this.getZFromScale(scale);
+  
+    this.camera.position.set(x, y, z);
+  
     // point size scales at end of zoom
-    let new_size = zoomScaler(z)
-    let point_group = this.scene.children[0].children
+    let new_size = zoomScaler(z);
+    let point_group = this.scene.children[0].children;
     for (let c = 0; c < point_group.length; c++) {
-      point_group[c].material.uniforms.size.value = new_size
+      point_group[c].material.uniforms.size.value = new_size;
     }
   }
 
   setUpCamera() {
     let { width, height, mnist_embeddings } = this.props
+
+    if (!Array.isArray(mnist_embeddings) || mnist_embeddings.length === 0) {
+      console.warn('mnist_embeddings is empty or not an array')
+      return
+    }
 
     let aspect = this.camera.aspect
     let vFOV = this.camera.fov
@@ -178,10 +487,10 @@ class Projection extends Component {
     let camera_z_start
     if (data_aspect > aspect) {
       // console.log("width is limiter");
-      // camera_z_start = max_x_from_center / Math.tan(rvFOV / 2) / aspect
+      camera_z_start = max_x_from_center / Math.tan(rvFOV / 2) / aspect
     } else {
       // console.log("height is limiter");
-      // camera_z_start = max_y_from_center / Math.tan(rvFOV / 2)
+      camera_z_start = max_y_from_center / Math.tan(rvFOV / 2)
     }
 
     camera_z_start = max_center / Math.tan(rvFOV / 2)
@@ -190,24 +499,37 @@ class Projection extends Component {
     this.camera.far = far
     this.camera.position.z = camera_z_start * 1.1
 
-    // set up zoom
-    this.d3_zoom = d3
-      .zoom()
-      .scaleExtent([this.getScaleFromZ(far - 1), this.getScaleFromZ(0.1)])
-      .on('zoom', this.zoomHandler.bind(this))
-
-    let view = d3.select(this.mount)
-    this.view = view
-    view.call(this.d3_zoom)
-    let initial_scale = this.getScaleFromZ(this.camera.position.z)
-    var initial_transform = d3.zoomIdentity
-      .translate(width / 2, height / 2)
-      .scale(initial_scale)
-    this.d3_zoom.transform(view, initial_transform)
-  }
+    // Only set up zoom if enabled
+    if (this.state.isZoomEnabled) {
+      this.d3_zoom = d3
+        .zoom()
+        .scaleExtent([this.getScaleFromZ(far - 1), this.getScaleFromZ(0.1)])
+        .on('zoom', this.zoomHandler.bind(this));
+  
+      let view = d3.select(this.mount);
+      this.view = view;
+      view.call(this.d3_zoom);
+      let initial_scale = this.getScaleFromZ(this.camera.position.z);
+      var initial_transform = d3.zoomIdentity
+        .translate(width / 2, height / 2)
+        .scale(initial_scale);
+      this.d3_zoom.transform(view, initial_transform);
+    }
+}
 
   addPoints() {
     let { mnist_embeddings, mnist_labels, color_array } = this.props
+
+    if (!Array.isArray(mnist_embeddings) || mnist_embeddings.length === 0) {
+      console.warn('mnist_embeddings is empty or not an array')
+      return
+    }
+  
+    // Ensure mnist_labels is an array and has elements before proceeding
+    if (!Array.isArray(mnist_labels) || mnist_labels.length === 0) {
+      console.warn('mnist_labels is empty or not an array')
+      return
+    }
 
     // split embeddings and labels into chunks to match sprites
     let ranges = []
@@ -337,6 +659,12 @@ class Projection extends Component {
   }
 
   addBlankHighlightPoints() {
+
+    if (!Array.isArray(this.textures) || this.textures.length === 0) {
+      console.warn('Textures are not loaded or empty')
+      return
+    }
+
     let hover_container = new THREE.Group()
     this.scene.add(hover_container)
 
@@ -375,7 +703,7 @@ class Projection extends Component {
         varying vec2 vOffset;
         void main() {
           vec2 uv = vec2( gl_PointCoord.x, gl_PointCoord.y );
-          vec4 tex = texture2D( texture, uv * repeat + vOffset );
+          vec4 tex = texture2D( texture, uv * repeat + vOffset ); 
           tex.a = tex.r;
           tex.r = 1.0;
           tex.g = 1.0;
@@ -550,19 +878,130 @@ class Projection extends Component {
   componentWillUnmount() {
     this.mount.removeChild(this.renderer.domElement)
   }
+  resetView() {
+    const point_group = this.scene.children[0].children; // Access the points group
+  
+    // Reset the visibility of all points
+    point_group.forEach(points => {
+      points.visible = true;
+    });
+  
+    // Optionally reset the camera view
+    this.setUpCamera();
+  
+    this.setState({
+      selectedEmbeddings: [],
+      isPolygonDrawn: false, // Hide the polygon-related buttons
+    });
+  }
   
 
   render() {
-    let { width, height } = this.props
+    let { width, height } = this.props;
     return (
-      <div
-        style={{ width: width, height: height, overflow: 'hidden' }}
-        ref={mount => {
-          this.mount = mount
-        }}
-      />
-    )
-  }
-}
+      <div style={{ position: 'relative' }}>
+        {/* Zoom Toggle Button */}
+        <button
+          onClick={this.toggleZoom}
+          style={{
+            position: 'absolute',
+            zIndex: 1,
+            top: '10px',
+            left: '10px',
+            backgroundColor: 'transparent',
+            border: 'none',
+            cursor: 'pointer',
+            padding: '0',
+          }}
+        >
+          <img
+            src={zoom}
+            alt="Zoom Toggle"
+            style={{
+              filter: this.state.isZoomEnabled ? 'invert(100%)' : 'invert(50%)',
+              width: '24px',
+              height: '24px',
+            }}
+          />
+        </button>
+  
+        {/* Lasso Toggle Button */}
+        <button
+          onClick={this.toggleLasso}
+          style={{
+            position: 'absolute',
+            zIndex: 1,
+            top: '10px',
+            left: '44px',
+            backgroundColor: 'transparent',
+            border: 'none',
+            cursor: 'pointer',
+            padding: '0',
+          }}
+        >
+          <img
+            src={lassoIcon}
+            alt="Lasso Toggle"
+            style={{
+              filter: this.state.isLassoActive ? 'invert(100%)' : 'invert(50%)',
+              width: '24px',
+              height: '24px',
+            }}
+          />
+        </button>
+  
+        {/* Reset View Button */}
+        <button
+          onClick={this.resetView.bind(this)}
+          style={{
+            position: 'absolute',
+            zIndex: 1,
+            top: '10px',
+            left: '78px',
+            backgroundColor: 'transparent',
+            border: 'none',
+            cursor: 'pointer',
+            padding: '0',
+          }}
+        >
+          <img
+            src={reset}
+            alt="Reset View"
+            style={{ width: '24px', height: '24px' }}
+          />
+        </button>
+  
+        {/* Generate t-SNE Plot Button (Shown only when the lasso is active and polygon is drawn) */}
+        {this.state.isLassoActive && this.state.isPolygonDrawn && (
+          <button
+            onClick={this.handleGenerateTSNE}
+            style={{
+              position: 'absolute',
+              zIndex: 1,
+              top: '50px',
+              left: '10px',
+              backgroundColor: '#4CAF50',
+              color: 'white',
+              border: 'none',
+              padding: '10px',
+              cursor: 'pointer',
+              borderRadius: '5px',
+            }}
+          >
+            Generate t-SNE Plot
+          </button>
+        )}
+  
+        {/* Canvas Mount */}
+        <div
+          style={{ width: width, height: height, overflow: 'hidden' }}
+          ref={mount => {
+            this.mount = mount;
+          }}
+        />
+      </div>
+    );
+  }  
+}  
 
 export default Projection
